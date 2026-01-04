@@ -18,6 +18,7 @@ import { createFatalErrorDialog } from './views/fatal-error-dialog.js';
 import { createIssueDialog } from './views/issue-dialog.js';
 import { createListView } from './views/list.js';
 import { createMailView } from './views/mail.js';
+import { createAgentsView } from './views/agents.js';
 import { createTopNav } from './views/nav.js';
 import { createNewIssueDialog } from './views/new-issue-dialog.js';
 import { createWorkspacePicker } from './views/workspace-picker.js';
@@ -40,6 +41,7 @@ export function bootstrap(root_element) {
     <section id="epics-root" class="route epics" hidden></section>
     <section id="board-root" class="route board" hidden></section>
     <section id="mail-root" class="route mail panel" hidden></section>
+    <section id="agents-root" class="route agents panel" hidden></section>
     <section id="detail-panel" class="route detail" hidden></section>
   `;
   render(shell, root_element);
@@ -54,12 +56,22 @@ export function bootstrap(root_element) {
   const board_root = document.getElementById('board-root');
   /** @type {HTMLElement|null} */
   const mail_root = document.getElementById('mail-root');
+  /** @type {HTMLElement|null} */
+  const agents_root = document.getElementById('agents-root');
 
   /** @type {HTMLElement|null} */
   const list_mount = document.getElementById('list-panel');
   /** @type {HTMLElement|null} */
   const detail_mount = document.getElementById('detail-panel');
-  if (list_mount && issues_root && epics_root && board_root && mail_root && detail_mount) {
+  if (
+    list_mount &&
+    issues_root &&
+    epics_root &&
+    board_root &&
+    mail_root &&
+    agents_root &&
+    detail_mount
+  ) {
     /** @type {HTMLElement|null} */
     const header_loading = document.getElementById('header-loading');
     const activity = createActivityIndicator(header_loading);
@@ -653,9 +665,17 @@ export function bootstrap(root_element) {
       subscriptions,
       sub_issue_stores
     );
+    const agents_view = createAgentsView(
+      agents_root,
+      data,
+      (id) => router.gotoIssue(id),
+      store,
+      subscriptions,
+      sub_issue_stores
+    );
     // Preload epics when switching to view
     /**
-     * @param {{ selected_id: string | null, view: 'issues'|'epics'|'board'|'mail', filters: any }} s
+     * @param {{ selected_id: string | null, view: 'issues'|'epics'|'board'|'mail'|'agents', filters: any }} s
      */
     // --- Subscriptions: tab-level management and filter-driven updates ---
     /** @type {null | (() => Promise<void>)} */
@@ -664,6 +684,8 @@ export function bootstrap(root_element) {
     let unsub_epics_tab = null;
     /** @type {null | (() => Promise<void>)} */
     let unsub_mail_tab = null;
+    /** @type {null | (() => Promise<void>)} */
+    let unsub_agents_tab = null;
     /** @type {null | (() => Promise<void>)} */
     let unsub_board_ready = null;
     /** @type {null | (() => Promise<void>)} */
@@ -711,7 +733,7 @@ export function bootstrap(root_element) {
     /**
      * Ensure only the active tab has subscriptions; clean up previous.
      *
-     * @param {{ view: 'issues'|'epics'|'board'|'mail', filters: any }} s
+     * @param {{ view: 'issues'|'epics'|'board'|'mail'|'agents', filters: any }} s
      */
     function ensureTabSubscriptions(s) {
       // Issues tab
@@ -821,6 +843,40 @@ export function bootstrap(root_element) {
           sub_issue_stores.unregister('tab:mail');
         } catch (err) {
           log('unregister mail store failed: %o', err);
+        }
+      }
+
+      // Agents tab
+      if (s.view === 'agents') {
+        // Register store first to avoid race with initial snapshot
+        try {
+          sub_issue_stores.register('tab:agents', { type: 'agent-status' });
+        } catch (err) {
+          log('register agents store failed: %o', err);
+        }
+        // Only subscribe if not already subscribed and not in-flight
+        if (!unsub_agents_tab && !pending_subscriptions.has('tab:agents')) {
+          pending_subscriptions.add('tab:agents');
+          void subscriptions
+            .subscribeList('tab:agents', { type: 'agent-status' })
+            .then((unsub) => {
+              unsub_agents_tab = unsub;
+            })
+            .catch((err) => {
+              log('subscribe agents failed: %o', err);
+              showFatalFromError(err, 'agents');
+            })
+            .finally(() => {
+              pending_subscriptions.delete('tab:agents');
+            });
+        }
+      } else if (unsub_agents_tab) {
+        void unsub_agents_tab().catch(() => {});
+        unsub_agents_tab = null;
+        try {
+          sub_issue_stores.unregister('tab:agents');
+        } catch (err) {
+          log('unregister agents store failed: %o', err);
         }
       }
 
@@ -968,15 +1024,23 @@ export function bootstrap(root_element) {
     /**
      * Manage route visibility and list subscriptions per view.
      *
-     * @param {{ selected_id: string | null, view: 'issues'|'epics'|'board'|'mail', filters: any }} s
+     * @param {{ selected_id: string | null, view: 'issues'|'epics'|'board'|'mail'|'agents', filters: any }} s
      */
     const onRouteChange = (s) => {
-      if (issues_root && epics_root && board_root && mail_root && detail_mount) {
+      if (
+        issues_root &&
+        epics_root &&
+        board_root &&
+        mail_root &&
+        agents_root &&
+        detail_mount
+      ) {
         // Underlying route visibility is controlled only by selected view
         issues_root.hidden = s.view !== 'issues';
         epics_root.hidden = s.view !== 'epics';
         board_root.hidden = s.view !== 'board';
         mail_root.hidden = s.view !== 'mail';
+        agents_root.hidden = s.view !== 'agents';
         // detail_mount visibility handled in subscription above
       }
       // Ensure subscriptions for the active tab before loading the view to
@@ -990,6 +1054,9 @@ export function bootstrap(root_element) {
       }
       if (!s.selected_id && s.view === 'mail') {
         void mail_view.load();
+      }
+      if (!s.selected_id && s.view === 'agents') {
+        void agents_view.load();
       }
       window.localStorage.setItem('beads-ui.view', s.view);
     };

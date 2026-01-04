@@ -43,6 +43,10 @@ export function mapSubscriptionToBdArgs(spec) {
       // Use gt mail inbox --json for mail list
       return ['mail', 'inbox', '--json'];
     }
+    case 'agent-status': {
+      // Use gt status --json for agent status
+      return ['status', '--json'];
+    }
     default: {
       throw badRequest(`Unknown subscription type: ${t}`);
     }
@@ -78,6 +82,64 @@ export function normalizeMailList(value) {
       closed_at: null
     });
   }
+  return out;
+}
+
+/**
+ * Normalize agent status output for the registry.
+ * - Flattens nested agent structure (town agents + rig agents).
+ * - Ensures `id` is a string (agent address).
+ * - Sets timestamps to current time since status is live data.
+ *
+ * @param {unknown} value
+ * @returns {Array<{ id: string, created_at: number, updated_at: number, closed_at: number | null } & Record<string, unknown>>}
+ */
+export function normalizeAgentStatus(value) {
+  if (!value || typeof value !== 'object') {
+    return [];
+  }
+  /** @type {Array<{ id: string, created_at: number, updated_at: number, closed_at: number | null } & Record<string, unknown>>} */
+  const out = [];
+  const now = Date.now();
+
+  const data = /** @type {any} */ (value);
+
+  // Add town-level agents (mayor, deacon)
+  if (Array.isArray(data.agents)) {
+    for (const agent of data.agents) {
+      const id = String(agent.address ?? '');
+      if (id.length === 0) continue;
+      out.push({
+        ...agent,
+        id,
+        created_at: now,
+        updated_at: now,
+        closed_at: null
+      });
+    }
+  }
+
+  // Add rig agents (witness, refinery, polecats, crew)
+  if (Array.isArray(data.rigs)) {
+    for (const rig of data.rigs) {
+      const rig_name = String(rig.name ?? '');
+      if (Array.isArray(rig.agents)) {
+        for (const agent of rig.agents) {
+          const id = String(agent.address ?? '');
+          if (id.length === 0) continue;
+          out.push({
+            ...agent,
+            id,
+            rig: rig_name,
+            created_at: now,
+            updated_at: now,
+            closed_at: null
+          });
+        }
+      }
+    }
+  }
+
   return out;
 }
 
@@ -154,12 +216,14 @@ export async function fetchListForSubscription(spec, options = {}) {
   }
 
   try {
-    // Use gt for mail-inbox, bd for everything else
-    const isMailInbox = String(spec.type) === 'mail-inbox';
-    const res = isMailInbox
+    // Use gt for mail-inbox and agent-status, bd for everything else
+    const useGt =
+      String(spec.type) === 'mail-inbox' ||
+      String(spec.type) === 'agent-status';
+    const res = useGt
       ? await runGtJson(args, { cwd: options.cwd })
       : await runBdJson(args, { cwd: options.cwd });
-    const cmdName = isMailInbox ? 'gt' : 'bd';
+    const cmdName = useGt ? 'gt' : 'bd';
 
     if (!res || res.code !== 0 || !('stdoutJson' in res)) {
       log(
@@ -214,8 +278,16 @@ export async function fetchListForSubscription(spec, options = {}) {
       });
     }
 
-    // For mail-inbox, normalize differently since mail doesn't have issue fields
-    const items = isMailInbox ? normalizeMailList(raw) : normalizeIssueList(raw);
+    // Different normalization for mail-inbox, agent-status, and regular issues
+    let items;
+    if (String(spec.type) === 'mail-inbox') {
+      items = normalizeMailList(raw);
+    } else if (String(spec.type) === 'agent-status') {
+      // agent-status returns a single object, not an array
+      items = normalizeAgentStatus(res.stdoutJson);
+    } else {
+      items = normalizeIssueList(raw);
+    }
     return { ok: true, items };
   } catch (err) {
     log('%s invocation failed for %o (args=%o): %o', cmdName, spec, args, err);
