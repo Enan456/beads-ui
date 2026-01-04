@@ -3,6 +3,7 @@ import { resolveDbPath } from './db.js';
 import { debug } from './logging.js';
 
 const log = debug('bd');
+const log_gt = debug('gt');
 
 /**
  * Get the git user name from git config.
@@ -161,6 +162,110 @@ export async function runBdJson(args, options = {}) {
   } catch (err) {
     log('bd returned invalid JSON (args=%o): %o', args, err);
     return { code: 0, stderr: 'Invalid JSON from bd' };
+  }
+  return { code: 0, stdoutJson: parsed };
+}
+
+/**
+ * Run the `gt` CLI with provided arguments.
+ * Shell is not used to avoid injection; args must be pre-split.
+ *
+ * @param {string[]} args - Arguments to pass (e.g., ["mail", "inbox", "--json"]).
+ * @param {{ cwd?: string, env?: Record<string, string | undefined>, timeout_ms?: number }} [options]
+ * @returns {Promise<{ code: number, stdout: string, stderr: string }>}
+ */
+export function runGt(args, options = {}) {
+  const bin = 'gt';
+
+  const spawn_opts = {
+    cwd: options.cwd || process.cwd(),
+    env: options.env || process.env,
+    shell: false,
+    windowsHide: true
+  };
+
+  /** @type {string[]} */
+  const final_args = args.slice();
+
+  return new Promise((resolve) => {
+    const child = spawn(bin, final_args, spawn_opts);
+
+    /** @type {string[]} */
+    const out_chunks = [];
+    /** @type {string[]} */
+    const err_chunks = [];
+
+    if (child.stdout) {
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => {
+        out_chunks.push(String(chunk));
+      });
+    }
+    if (child.stderr) {
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk) => {
+        err_chunks.push(String(chunk));
+      });
+    }
+
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let timer;
+    if (options.timeout_ms && options.timeout_ms > 0) {
+      timer = setTimeout(() => {
+        child.kill('SIGKILL');
+      }, options.timeout_ms);
+      timer.unref?.();
+    }
+
+    /**
+     * @param {number | string | null} code
+     */
+    const finish = (code) => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      resolve({
+        code: Number(code || 0),
+        stdout: out_chunks.join(''),
+        stderr: err_chunks.join('')
+      });
+    };
+
+    child.on('error', (err) => {
+      log_gt('spawn error running %s %o', bin, err);
+      finish(127);
+    });
+    child.on('close', (code) => {
+      finish(code);
+    });
+  });
+}
+
+/**
+ * Run `gt` and parse JSON from stdout if exit code is 0.
+ *
+ * @param {string[]} args - Must include flags that cause JSON to be printed (e.g., `--json`).
+ * @param {{ cwd?: string, env?: Record<string, string | undefined>, timeout_ms?: number }} [options]
+ * @returns {Promise<{ code: number, stdoutJson?: unknown, stderr?: string }>}
+ */
+export async function runGtJson(args, options = {}) {
+  const result = await runGt(args, options);
+  if (result.code !== 0) {
+    log_gt(
+      'gt exited with code %d (args=%o) stderr=%s',
+      result.code,
+      args,
+      result.stderr
+    );
+    return { code: result.code, stderr: result.stderr };
+  }
+  /** @type {unknown} */
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout || 'null');
+  } catch (err) {
+    log_gt('gt returned invalid JSON (args=%o): %o', args, err);
+    return { code: 0, stderr: 'Invalid JSON from gt' };
   }
   return { code: 0, stdoutJson: parsed };
 }

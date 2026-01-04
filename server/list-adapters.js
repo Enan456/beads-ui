@@ -1,4 +1,4 @@
-import { runBdJson } from './bd.js';
+import { runBdJson, runGtJson } from './bd.js';
 import { debug } from './logging.js';
 
 const log = debug('list-adapters');
@@ -39,10 +39,46 @@ export function mapSubscriptionToBdArgs(spec) {
       }
       return ['show', id, '--json'];
     }
+    case 'mail-inbox': {
+      // Use gt mail inbox --json for mail list
+      return ['mail', 'inbox', '--json'];
+    }
     default: {
       throw badRequest(`Unknown subscription type: ${t}`);
     }
   }
+}
+
+/**
+ * Normalize mail list output for the registry.
+ * - Ensures `id` is a string.
+ * - Coerces timestamp to number for created_at and updated_at.
+ * - Sets closed_at to null (mail items aren't "closed").
+ *
+ * @param {unknown} value
+ * @returns {Array<{ id: string, created_at: number, updated_at: number, closed_at: number | null } & Record<string, unknown>>}
+ */
+export function normalizeMailList(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  /** @type {Array<{ id: string, created_at: number, updated_at: number, closed_at: number | null } & Record<string, unknown>>} */
+  const out = [];
+  for (const it of value) {
+    const id = String(it.id ?? '');
+    if (id.length === 0) {
+      continue;
+    }
+    const timestamp_val = parseTimestamp(it.timestamp);
+    out.push({
+      ...it,
+      id,
+      created_at: timestamp_val,
+      updated_at: timestamp_val,
+      closed_at: null
+    });
+  }
+  return out;
 }
 
 /**
@@ -118,10 +154,17 @@ export async function fetchListForSubscription(spec, options = {}) {
   }
 
   try {
-    const res = await runBdJson(args, { cwd: options.cwd });
+    // Use gt for mail-inbox, bd for everything else
+    const isMailInbox = String(spec.type) === 'mail-inbox';
+    const res = isMailInbox
+      ? await runGtJson(args, { cwd: options.cwd })
+      : await runBdJson(args, { cwd: options.cwd });
+    const cmdName = isMailInbox ? 'gt' : 'bd';
+
     if (!res || res.code !== 0 || !('stdoutJson' in res)) {
       log(
-        'bd failed for %o (args=%o) code=%s stderr=%s',
+        '%s failed for %o (args=%o) code=%s stderr=%s',
+        cmdName,
         spec,
         args,
         res?.code,
@@ -130,8 +173,8 @@ export async function fetchListForSubscription(spec, options = {}) {
       return {
         ok: false,
         error: {
-          code: 'bd_error',
-          message: String(res?.stderr || 'bd failed'),
+          code: `${cmdName}_error`,
+          message: String(res?.stderr || `${cmdName} failed`),
           details: { exit_code: res?.code ?? -1 }
         }
       };
@@ -171,16 +214,17 @@ export async function fetchListForSubscription(spec, options = {}) {
       });
     }
 
-    const items = normalizeIssueList(raw);
+    // For mail-inbox, normalize differently since mail doesn't have issue fields
+    const items = isMailInbox ? normalizeMailList(raw) : normalizeIssueList(raw);
     return { ok: true, items };
   } catch (err) {
-    log('bd invocation failed for %o (args=%o): %o', spec, args, err);
+    log('%s invocation failed for %o (args=%o): %o', cmdName, spec, args, err);
     return {
       ok: false,
       error: {
-        code: 'bd_error',
+        code: `${cmdName}_error`,
         message:
-          (err && /** @type {any} */ (err).message) || 'bd invocation failed'
+          (err && /** @type {any} */ (err).message) || `${cmdName} invocation failed`
       }
     };
   }

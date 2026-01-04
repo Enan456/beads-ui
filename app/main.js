@@ -17,6 +17,7 @@ import { createEpicsView } from './views/epics.js';
 import { createFatalErrorDialog } from './views/fatal-error-dialog.js';
 import { createIssueDialog } from './views/issue-dialog.js';
 import { createListView } from './views/list.js';
+import { createMailView } from './views/mail.js';
 import { createTopNav } from './views/nav.js';
 import { createNewIssueDialog } from './views/new-issue-dialog.js';
 import { createWorkspacePicker } from './views/workspace-picker.js';
@@ -38,6 +39,7 @@ export function bootstrap(root_element) {
     </section>
     <section id="epics-root" class="route epics" hidden></section>
     <section id="board-root" class="route board" hidden></section>
+    <section id="mail-root" class="route mail panel" hidden></section>
     <section id="detail-panel" class="route detail" hidden></section>
   `;
   render(shell, root_element);
@@ -50,12 +52,14 @@ export function bootstrap(root_element) {
   const epics_root = document.getElementById('epics-root');
   /** @type {HTMLElement|null} */
   const board_root = document.getElementById('board-root');
+  /** @type {HTMLElement|null} */
+  const mail_root = document.getElementById('mail-root');
 
   /** @type {HTMLElement|null} */
   const list_mount = document.getElementById('list-panel');
   /** @type {HTMLElement|null} */
   const detail_mount = document.getElementById('detail-panel');
-  if (list_mount && issues_root && epics_root && board_root && detail_mount) {
+  if (list_mount && issues_root && epics_root && board_root && mail_root && detail_mount) {
     /** @type {HTMLElement|null} */
     const header_loading = document.getElementById('header-loading');
     const activity = createActivityIndicator(header_loading);
@@ -641,15 +645,25 @@ export function bootstrap(root_element) {
       sub_issue_stores,
       transport
     );
+    const mail_view = createMailView(
+      mail_root,
+      data,
+      (id) => router.gotoIssue(id),
+      store,
+      subscriptions,
+      sub_issue_stores
+    );
     // Preload epics when switching to view
     /**
-     * @param {{ selected_id: string | null, view: 'issues'|'epics'|'board', filters: any }} s
+     * @param {{ selected_id: string | null, view: 'issues'|'epics'|'board'|'mail', filters: any }} s
      */
     // --- Subscriptions: tab-level management and filter-driven updates ---
     /** @type {null | (() => Promise<void>)} */
     let unsub_issues_tab = null;
     /** @type {null | (() => Promise<void>)} */
     let unsub_epics_tab = null;
+    /** @type {null | (() => Promise<void>)} */
+    let unsub_mail_tab = null;
     /** @type {null | (() => Promise<void>)} */
     let unsub_board_ready = null;
     /** @type {null | (() => Promise<void>)} */
@@ -697,7 +711,7 @@ export function bootstrap(root_element) {
     /**
      * Ensure only the active tab has subscriptions; clean up previous.
      *
-     * @param {{ view: 'issues'|'epics'|'board', filters: any }} s
+     * @param {{ view: 'issues'|'epics'|'board'|'mail', filters: any }} s
      */
     function ensureTabSubscriptions(s) {
       // Issues tab
@@ -773,6 +787,40 @@ export function bootstrap(root_element) {
           sub_issue_stores.unregister('tab:epics');
         } catch (err) {
           log('unregister epics store failed: %o', err);
+        }
+      }
+
+      // Mail tab
+      if (s.view === 'mail') {
+        // Register store first to avoid race with initial snapshot
+        try {
+          sub_issue_stores.register('tab:mail', { type: 'mail-inbox' });
+        } catch (err) {
+          log('register mail store failed: %o', err);
+        }
+        // Only subscribe if not already subscribed and not in-flight
+        if (!unsub_mail_tab && !pending_subscriptions.has('tab:mail')) {
+          pending_subscriptions.add('tab:mail');
+          void subscriptions
+            .subscribeList('tab:mail', { type: 'mail-inbox' })
+            .then((unsub) => {
+              unsub_mail_tab = unsub;
+            })
+            .catch((err) => {
+              log('subscribe mail failed: %o', err);
+              showFatalFromError(err, 'mail');
+            })
+            .finally(() => {
+              pending_subscriptions.delete('tab:mail');
+            });
+        }
+      } else if (unsub_mail_tab) {
+        void unsub_mail_tab().catch(() => {});
+        unsub_mail_tab = null;
+        try {
+          sub_issue_stores.unregister('tab:mail');
+        } catch (err) {
+          log('unregister mail store failed: %o', err);
         }
       }
 
@@ -920,14 +968,15 @@ export function bootstrap(root_element) {
     /**
      * Manage route visibility and list subscriptions per view.
      *
-     * @param {{ selected_id: string | null, view: 'issues'|'epics'|'board', filters: any }} s
+     * @param {{ selected_id: string | null, view: 'issues'|'epics'|'board'|'mail', filters: any }} s
      */
     const onRouteChange = (s) => {
-      if (issues_root && epics_root && board_root && detail_mount) {
+      if (issues_root && epics_root && board_root && mail_root && detail_mount) {
         // Underlying route visibility is controlled only by selected view
         issues_root.hidden = s.view !== 'issues';
         epics_root.hidden = s.view !== 'epics';
         board_root.hidden = s.view !== 'board';
+        mail_root.hidden = s.view !== 'mail';
         // detail_mount visibility handled in subscription above
       }
       // Ensure subscriptions for the active tab before loading the view to
@@ -938,6 +987,9 @@ export function bootstrap(root_element) {
       }
       if (!s.selected_id && s.view === 'board') {
         void board_view.load();
+      }
+      if (!s.selected_id && s.view === 'mail') {
+        void mail_view.load();
       }
       window.localStorage.setItem('beads-ui.view', s.view);
     };
